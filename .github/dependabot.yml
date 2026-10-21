@@ -6,6 +6,9 @@ updates:
       interval: daily
       time: "00:00"
       timezone: Etc/UTC
+    cooldown:
+      exclude:
+        - "tailscale.com"
     open-pull-requests-limit: 1
     allow:
       - dependency-name: tailscale.com
