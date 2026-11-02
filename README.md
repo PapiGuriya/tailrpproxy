@@ -172,6 +172,136 @@ The standalone binary serves health and aggregate metrics on
 - `/readyz`
 - `/metrics`
 
+## Optional embedded-node diagnostics
+
+Diagnostics are disabled by default. They use the running proxy's embedded
+Tailscale identity in `tsnet` and `operator` modes; `native` mode rejects this
+option. They do not use the Docker host's Tailscale identity.
+
+After building or obtaining an image containing this feature, add only this
+setting to the **existing** Compose service (retain its image, state volume,
+identity, tags, route, network, and security settings):
+
+```yaml
+services:
+  tailrpproxy:
+    environment:
+      RPPROXY_DIAGNOSTICS_PORT: "9091"
+```
+
+For a local build from the reviewed checkout, create an override alongside your
+existing `compose.yaml` (adjust `context` to that checkout's absolute path):
+
+```yaml
+# compose.diagnostics.yaml
+services:
+  tailrpproxy:
+    image: tailrpproxy:peer-diagnostics
+    build:
+      context: /absolute/path/to/tailrpproxy
+    environment:
+      RPPROXY_DIAGNOSTICS_PORT: "9091"
+```
+
+When you are ready to deploy, run from the Compose deployment directory:
+
+```sh
+docker compose -f compose.yaml -f compose.diagnostics.yaml build tailrpproxy
+docker compose -f compose.yaml -f compose.diagnostics.yaml up -d --no-deps tailrpproxy
+```
+
+This recreates the service, so schedule it for an appropriate maintenance window.
+Do not remove or recreate the existing state volume. No new ports should be
+published. The listener always binds to `127.0.0.1`, regardless of the health
+listener address. `-diagnostics-port=9091` is the equivalent binary option; a
+host/address cannot be supplied. If the container uses host networking, loopback
+is shared with the host; other processes sharing that network namespace can also
+use diagnostics. Access to Docker exec/the container network namespace is the
+trust boundary; there is no diagnostic password or token.
+
+Use the image's existing Alpine shell and BusyBox `wget`. Enter the iPhone's
+Tailscale IP interactively so private addresses are not hardcoded in scripts or
+shell history. Leave the port empty to skip TCP, or enter the **current** RemotePair
+listening port (it can change; this is not the PeerAPI port):
+
+```sh
+docker exec -it tailrpproxy sh -c '
+  printf "iPhone Tailscale IP: "
+  IFS= read -r peer
+  printf "RemotePair TCP port (Enter to skip): "
+  IFS= read -r port
+  case "$peer" in ""|*[!0-9a-fA-F:.]*) echo "Invalid IP characters"; exit 1;; esac
+  case "$port" in *[!0-9]*) echo "Invalid port characters"; exit 1;; esac
+  query="peer=$peer&count=3&timeout=2s"
+  if [ -n "$port" ]; then query="$query&port=$port"; fi
+  wget -qO- -T 70 --post-data="" "http://127.0.0.1:9091/diagnostics/peer?$query"
+'
+```
+
+The response is indented JSON, readable directly in the terminal. Change the
+command's `count` (1–5 per ping type) or `timeout` (100ms–5s per operation) as
+needed; for a high-latency phone, try `timeout=5s`. Defaults are 3 and 2s. One
+request runs at a time; additional requests get HTTP 429 immediately. The entire
+request is capped at 65 seconds and disconnect/shutdown cancels pending work.
+There is no request body, and GET, browser Origin headers, nonliteral-loopback
+Host headers, unknown parameters, and duplicate parameters are rejected.
+Malformed inputs return 400; peers absent from the current network map (including
+self or stale status entries) return 404; unavailable node status returns 503.
+BusyBox wget reports non-2xx responses as errors; add `-S` to see the HTTP status.
+A 200 response means the diagnostic ran: inspect each sample's `success`/`error`
+and `tcp.success` to determine connectivity, rather than wget's exit code alone.
+
+Interpret results as follows:
+
+- `peer` is a selected snapshot **before** probes. `online` means connected to
+  Tailscale control, not guaranteed reachable. `active`, `expired`, last-seen and
+  handshake times provide context. `direct_address`, `derp_region`, and
+  `peer_relay` are status hints and may be stale; a DERP home region alone does
+  not establish that a probe used DERP. Missing times mean unavailable.
+- `disco.samples` reports each discovery RTT and its observed path: `direct`
+  (UDP), `derp` (region in `derp_region`), or `peer-relay`. An initial DERP reply
+  followed by direct replies is normal path discovery. `unknown` means the API
+  did not provide path information. A DISCO call may probe multiple endpoints;
+  its failures are not a precise measure of application packet loss.
+- `tsmp.samples` tests round trips **through the encrypted tunnel**. The pinned
+  Tailscale LocalAPI does not report transport paths for TSMP, so those samples
+  always say `unknown`; the DISCO path is not attributed to them. ICMP is not
+  used, since a phone may ignore it while TSMP succeeds. Neither ping test
+  establishes that TCP policy allows the RemotePair port.
+- Each ping type reports success/failure counts and minimum/average/maximum RTT
+  in milliseconds over successful samples only. No RTT statistics are emitted
+  if all probes fail. Failures/timeouts suggest loss, delay, sleeping peers, or
+  policy/path issues; a small sample is not a reliable long-term loss estimate.
+  Cancellation yields partial samples and a top-level error. Latency spikes can
+  matter even when all probes succeed.
+- Optional `tcp` rechecks peer membership, dials that exact IP and port through
+  tsnet, then closes promptly without sending an application payload. Success
+  confirms TCP establishment only. A refusal can mean no service/wrong port;
+  timeout can mean filtering, a sleeping device, loss, or excessive latency.
+  `peer unreachable` indicates a route/path failure. Other errors are deliberately
+  generic to avoid exposing LocalAPI bodies, URLs, or credentials. TCP elapsed
+  time includes the fresh membership lookup. No RemotePair protocol/authentication
+  exchange is attempted.
+
+These tests confirm **proxy → iPhone** reachability only. They do **not** prove
+that **iPhone → 10.7.0.1** enters the synthetic route, matches policy, reaches
+this proxy, or completes a SideStore refresh. Check that direction separately
+using existing reflector logs and metrics. Diagnostics add no request logs and
+do not consume reflector stream slots; Tailscale's existing internal logging
+may still record its ping activity. Health and metrics endpoints are unchanged.
+
+To disable diagnostics, remove the setting or set
+`RPPROXY_DIAGNOSTICS_PORT: "0"` in the effective Compose configuration, then
+recreate only this service using the same Compose files:
+
+```sh
+docker compose -f compose.yaml -f compose.diagnostics.yaml up -d --no-deps tailrpproxy
+```
+
+Retain the same image and persistent state volume. A command-line
+`-diagnostics-port` overrides the environment, so remove it or set it to zero
+as well. When disabled, no diagnostic listener or background probes run.
+
 ## Kubernetes Operator
 
 The plain manifest in `deploy/operator/tailrpproxy.yaml` replaces a Connector's

@@ -37,6 +37,7 @@ type options struct {
 	maxConnections        int
 	maxPerPeer            int
 	healthListen          string
+	diagnosticsPort       uint16
 	syntheticRoute        string
 	verbose               bool
 	tsnetStateDir         string
@@ -76,6 +77,9 @@ func run() error {
 		return err
 	}
 	configuration.transport = selectedTransport
+	if configuration.diagnosticsPort != 0 && selectedTransport == "native" {
+		return errors.New("diagnostics require an embedded tsnet transport (tsnet or operator)")
+	}
 	log.Printf("transport selected: %s (%s)", selectedTransport, selectionReason)
 	if configuration.tsnetPort != 0 && selectedTransport == "native" {
 		log.Printf("ignoring -tsnet-port=%d in native mode; host tailscaled owns the UDP port", configuration.tsnetPort)
@@ -101,6 +105,7 @@ func run() error {
 
 func parseFlags() (options, error) {
 	var configuration options
+	diagnosticsPort := strings.TrimSpace(os.Getenv("RPPROXY_DIAGNOSTICS_PORT"))
 	tsnetPort := strings.TrimSpace(os.Getenv("RPPROXY_TSNET_PORT"))
 	verbose, err := envBool("RPPROXY_VERBOSE")
 	if err != nil {
@@ -113,6 +118,7 @@ func parseFlags() (options, error) {
 	flag.DurationVar(&configuration.shutdownTimeout, "shutdown-timeout", 15*time.Second, "graceful shutdown timeout")
 	flag.IntVar(&configuration.maxConnections, "max-connections", 64, "maximum concurrent reflected TCP streams")
 	flag.IntVar(&configuration.maxPerPeer, "max-connections-per-peer", 8, "maximum concurrent reflected TCP streams per source peer")
+	flag.StringVar(&diagnosticsPort, "diagnostics-port", diagnosticsPort, "optional diagnostics port on 127.0.0.1 only; zero disables it")
 	flag.StringVar(&configuration.healthListen, "health-listen", envOrDefault("RPPROXY_HEALTH_LISTEN", "127.0.0.1:9090"), "health and metrics listen address; empty disables it")
 	flag.StringVar(&configuration.syntheticRoute, "synthetic-route", envOrDefault("RPPROXY_SYNTHETIC_ROUTE", "10.7.0.1/32"), "single IPv4 route reflected to the source peer")
 	flag.BoolVar(&configuration.verbose, "verbose", verbose, "include stream direction and termination details in logs")
@@ -131,6 +137,10 @@ func parseFlags() (options, error) {
 		return configuration, fmt.Errorf("-tsnet-port: %w", err)
 	}
 	configuration.tsnetPort = port
+	configuration.diagnosticsPort, err = parseDiagnosticsPort(diagnosticsPort)
+	if err != nil {
+		return configuration, err
+	}
 	return configuration, nil
 }
 

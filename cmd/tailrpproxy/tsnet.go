@@ -129,6 +129,19 @@ func runTSNetReflector(ctx context.Context, configuration options, route netip.P
 		}
 	}
 
+	if configuration.diagnosticsPort != 0 {
+		diagnosticContext, cancelDiagnostics := context.WithCancel(ctx)
+		defer cancelDiagnostics()
+		diagnosticServer, err := startDiagnosticServer(diagnosticContext, configuration.diagnosticsPort, localClient, mode.server.Dial)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cancelDiagnostics()
+			_ = diagnosticServer.Close()
+		}()
+	}
+
 	reflector.Metrics().SetReady(true)
 	defer reflector.Metrics().SetReady(false)
 	log.Printf(
